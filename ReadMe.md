@@ -1,13 +1,14 @@
-[![Build Status](https://travis-ci.org/flike/kingtask.svg?branch=master)](https://travis-ci.org/flike/kingtask)
+
 # 1. kingtask简介
-kingtask是一个由Go开发的异步任务系统。主要特性包含以下几个部分：
+kingtask([English document](./doc/README-EN.md))是一个由Go开发的异步任务系统。
+主要特性包含以下几个部分：
 
 1. 支持定时的异步任务。
 2. 支持失败重试机制，重试时刻和次数可自定义。
 3. 任务执行结果可查询。
-4. 一个异步任务由一个可执行文件组成，开发语言不限。
+4. 一个异步任务由一个可执行文件或者一个Web API组成，开发语言不限。
 5. 任务是无状态的，执行异步任务之前，不需要向kingtask注册任务。
-6. 异步任务的调用和执行完全解耦。调用和执行可用不同的程序语言实现。
+6. broker和worker通过redis解耦。
 7. 通过配置redis为master-slave架构，可实现kingtask的高可用，因为worker是无状态的，redis的master宕机后，可以修改worker配置将其连接到slave上。
 
 # 2. kingtask架构
@@ -20,19 +21,7 @@ kingtask的实现步骤如下所述：
 2. worker从redis中获取异步任务，或者到任务之后，执行该任务，并将任务结果存入redis。
 3. 对于失败的任务，如果该任务有重试机制，broker会重新发送该任务到redis，然后worker会重新执行。
 
-# 3. kingtask的安装
-
-## 3.1 编译kingtask
-
-```
-1. 安装Go语言环境，具体步骤请Google。
-2. 安装Godep, go get github.com/tools/godep
-2. git clone https://github.com/flike/kingtask.git src/github.com/flike/kingtask
-3. cd src/github.com/flike/kingtask
-4. source ./dev.sh
-5. make
-6. 设置配置文件
-```
+# 3. kingtask使用
 
 ## 3.1 配置broker
 
@@ -80,8 +69,7 @@ cd kingtask
 ./bin/worker -config=etc/worker.yaml
 ```
 
-# 4. kingtask的使用
-## 4.1 example异步任务源码
+### 3.3.1 example异步任务源码
 
 异步任务的结果需要输出到标准输出(os.Stdout),出错信息需要输出到标准出错输出(os.Stderr)。
 
@@ -116,21 +104,22 @@ func main() {
 
 ```
 
-## 4.2 调用异步任务
+### 3.3.2 调用异步任务
 
 kingtask异步任务系统提供Web API接口供客户端调用异步任务，主要有以下API接口：
 
 
-(1). 执行异步任务API接口
+(1). 执行脚本异步任务API接口
 
 ```
-POST /api/v1/task
+POST /api/v1/task/script
 
 #请求参数
 bin_name //字符串类型，表示异步对应的可执行文件名，必须提供
 args //字符串类型，执行参数，多个参数用空格分隔，可为空
 start_time //整型，异步任务开始执行时刻，为空表示立刻执行，可为空
 time_interval //字符串类型，表示失败后重试的时间间隔序列，可为空
+max_run_time //整型，异步任务最长运行时间（单位为秒),超过将会被系统kill，为空则使用系统统一的超时时长
 
 #返回值
 如果出错返回403和出错信息
@@ -150,7 +139,35 @@ http POST 127.0.0.1:9595/api/v1/task bin_name="mytask" args="12 hello" start_tim
 - 如果该异步任务执行失败，kingtask会重试该异步任务，时间间隔是:60s,600s,3600s。
 ```
 
-(2). 查看异步任务结果API接口
+(2). 执行RPC异步任务API接口
+
+```
+POST /api/v1/task/rpc
+
+#请求参数
+method //请求类型：GET,PUT,POST,DELETE
+url //异步任务对应的URL,需要加单引号
+args //json Marshal后的字符串,需要加单引号
+start_time //整型，异步任务开始执行时刻，为空表示立刻执行，可为空
+time_interval //字符串类型，表示失败后重试的时间间隔序列，可为空
+max_run_time //整型，异步任务最长运行时间（单位为秒),超过将会被系统kill，为空则使用系统统一的超时时长
+
+#返回值
+如果出错返回403和出错信息
+如果调用成功返回200和标示该task的uuid，该uuid可用于查询任务结果
+```
+
+例如执行以下API调用：
+
+```
+通过httpie工具执行以下命令
+http POST 127.0.0.1:9595/api/v1/task/rpc method="POST" url="http://127.0.0.1:1323/sum" args='{"a":132,"b":75}'
+
+则kingtask会执行：POST 参数(args)到URL(http://127.0.0.1:1323/sum)
+
+```
+
+(3). 查看异步任务结果API接口
 
 kingtask中的worker在执行完异步任务之后，都会将异步任务的结果存入redis，结果过期时间可配置。
 客户端可通过以下API接口查看异步任务结果：
@@ -166,7 +183,40 @@ GET /api/v1/task/result/:uuid
 http GET 127.0.0.1:9595/api/v1/task/result/db3e0b22-a249-4ed2-9532-fc6318ccd321
 ```
 
-## 4.3 调用异步任务例子
+(4). 统计休息查看
+
+查看积压任务个数
+
+```
+http GET 127.0.0.1:9595/api/v1/task/count/undo
+返回值
+如果出错返回403和出错信息
+如果调用成功返回200和和积压任务个数
+
+```
+
+查看某一天执行失败的异步任务个数
+
+```
+http GET 127.0.0.1:9595/api/v1/task/result/failure/:date
+date参数格式为:2006-01-02
+
+返回值
+如果出错返回403和出错信息
+如果调用成功返回200和和失败任务个数
+```
+
+查看某一天执行成功的异步任务个数
+
+```
+http GET 127.0.0.1:9595/api/v1/task/result/success/:date
+date参数格式为:2006-01-02
+返回值
+如果出错返回403和出错信息
+如果调用成功返回200和和成功任务个数
+```
+
+### 3.3.3 调用异步任务例子
 
 ```
 ➜  ~  http POST 127.0.0.1:9595/api/v1/task bin_name="example" args="12 34"
@@ -189,11 +239,39 @@ Date: Fri, 23 Oct 2015 01:11:44 GMT
     "message": "46"
 }
 
+http POST 127.0.0.1:9595/api/v1/task/rpc method="POST" url="http://127.0.0.1:1323/sum" args='{"a":132,"b":75}'
+HTTP/1.1 200 OK
+Content-Length: 38
+Content-Type: application/json; charset=utf-8
+Date: Fri, 30 Oct 2015 02:34:56 GMT
+
+"e6bfb95a-a619-48b7-acb6-396736486c7c"
+
+➜  ~  http GET 127.0.0.1:9595/api/v1/task/result/e6bfb95a-a619-48b7-acb6-396736486c7c
+HTTP/1.1 200 OK
+Content-Length: 52
+Content-Type: application/json; charset=utf-8
+Date: Fri, 30 Oct 2015 02:36:05 GMT
+
+{
+    "is_result_exist": 1,
+    "is_success": 1,
+    "message": "207"
+}
+
+➜  ~  http GET 127.0.0.1:9595/api/v1/task/result/success/2015-10-30
+HTTP/1.1 200 OK
+Content-Length: 1
+Content-Type: application/json; charset=utf-8
+Date: Fri, 30 Oct 2015 03:08:10 GMT
+
+3
+
+➜  ~  http GET 127.0.0.1:9595/api/v1/task/result/failure/2015-10-30
+HTTP/1.1 200 OK
+Content-Length: 1
+Content-Type: application/json; charset=utf-8
+Date: Fri, 30 Oct 2015 03:08:34 GMT
+
+2
 ```
-
-# 5. License
-kingshard采用MIT协议，相关协议请参看[License](./License)
-
-# 6. 反馈
-
-如果您在使用kingtask的过程中发现BUG或者有新的功能需求，非常欢迎您发邮件至flikecn#126.com与作者取得联系，或者加入QQ群(147926796)交流。
